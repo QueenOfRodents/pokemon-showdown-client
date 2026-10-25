@@ -1,5 +1,5 @@
 # Stage 1: Build Showdex standalone
-FROM node:18 AS showdex-builder
+FROM node:22 AS showdex-builder
 
 WORKDIR /showdex
 
@@ -12,7 +12,7 @@ ENV PROD_ANALYZE_BUNDLES=false
 RUN npm run build:standalone
 
 # Stage 2: Build pokemon-showdown-client
-FROM node:18 AS builder
+FROM node:22 AS builder
 
 WORKDIR /app
 
