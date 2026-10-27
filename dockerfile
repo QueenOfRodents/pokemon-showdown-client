@@ -1,71 +1,50 @@
-# Stage 1: Build Showdex standalone
-FROM node:22 AS showdex-builder
-
-WORKDIR /showdex
-
-# Install git (yarn is pre-installed in node:18)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    git \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN git config --global --add safe.directory '*'
-
-
-# Build standalone bundle (skip bundle analysis to speed up build)
-ENV PROD_ANALYZE_BUNDLES=false
-RUN npm run build:standalone
-
-# Stage 2: Build pokemon-showdown-client
-FROM node:22 AS builder
+# Build the Pokémon Showdown client
+FROM node:22-bookworm AS builder
 
 WORKDIR /app
 
-# Install git (required by build-indexes to clone pokemon-showdown and showdex)
-RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+# `build-full` clones and builds the Showdown server data.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install dependencies first (cached unless package.json changes)
 COPY package.json package-lock.json ./
-RUN npm install
+RUN npm ci
 
-# Copy source and build (cache busted only when source changes)
 COPY . .
 
-# Create caches directory (build-indexes uses it as cwd for git clone; it's gitignored so won't exist)
-RUN mkdir -p caches
+# The forked build script clones pokemon-showdown-queen, but later expects
+# the checkout at caches/pokemon-showdown. Give git clone that explicit name.
+RUN node -e "const fs = require('fs'); const p = 'build-tools/build-indexes'; const s = fs.readFileSync(p, 'utf8'); const old = 'git clone https://github.com/QueenOfRodents/pokemon-showdown-queen.git'; const replacement = old + ' pokemon-showdown'; if (!s.includes(old)) throw new Error('Expected clone command was not found'); fs.writeFileSync(p, s.replace(old, replacement));"
 
-# Run full build
-RUN npm run build-full && \
-    echo 'exports.BattlePokemonSprites = {};' > play.pokemonshowdown.com/data/pokedex-mini.js && \
-    echo 'exports.BattlePokemonSpritesGens = {};' > play.pokemonshowdown.com/data/pokedex-mini-bw.js
+RUN mkdir -p caches \
+    && npm run build-full
 
-# Resolve the config.js symlink into a real file so it survives the multi-stage copy.
-# play.pokemonshowdown.com/config/config.js is a symlink -> ../../config/config.js (gitignored),
-# which becomes a dangling symlink in the nginx stage if not resolved here.
-RUN cp --dereference play.pokemonshowdown.com/config/config.js /tmp/psc-config.js \
-    && mv /tmp/psc-config.js play.pokemonshowdown.com/config/config.js
 
-# Stage 3: Serve with nginx + PHP-FPM
-FROM php:8.2-fpm-alpine
+# Serve the generated static site
+FROM nginx:1.27-alpine
 
-# Install nginx and the tooling required to rebuild the client on container start
-RUN apk add --no-cache nginx nodejs npm git
+COPY --from=builder /app/play.pokemonshowdown.com/ /usr/share/nginx/html/
 
-# Copy the full built workspace so startup rebuilds can run inside the container
-COPY --from=builder /app /app
-
-# Create PHP config files from examples (gitignored originals don't exist in build)
-RUN cp /app/config/config-example.inc.php /app/config/config.inc.php && \
-    cp /app/config/servers-example.inc.php /app/config/servers.inc.php
-
-# Copy nginx config
-RUN rm -f /etc/nginx/http.d/default.conf
-COPY nginx.conf /etc/nginx/http.d/default.conf
-
-# Startup script (strip CRLF in case of Windows line endings)
-COPY start.sh /start.sh
-RUN sed -i 's/\r//' /start.sh && chmod +x /start.sh
+RUN printf '%s\n' \
+    'server {' \
+    '    listen 80;' \
+    '    server_name _;' \
+    '    root /usr/share/nginx/html;' \
+    '    index index.html;' \
+    '' \
+    '    location / {' \
+    '        try_files $uri $uri/ /index.html;' \
+    '    }' \
+    '' \
+    '    location ~* \.(?:css|js|mjs|json|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf)$ {' \
+    '        try_files $uri =404;' \
+    '        expires 7d;' \
+    '        add_header Cache-Control "public";' \
+    '    }' \
+    '}' \
+    > /etc/nginx/conf.d/default.conf
 
 EXPOSE 80
 
-CMD ["/start.sh"]
+CMD ["nginx", "-g", "daemon off;"]
