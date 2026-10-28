@@ -27,6 +27,7 @@ RUN rm -rf /usr/share/nginx/html/*
 
 # 2. Copy the built Showdown client
 COPY --from=builder /app/play.pokemonshowdown.com/ /usr/share/nginx/html/
+RUN chmod -R 755 /usr/share/nginx/html
 
 # 3. Copy your clean Nginx configuration directly over the default config
 COPY nginx.conf /etc/nginx/conf.d/default.conf
